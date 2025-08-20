@@ -1,12 +1,24 @@
 {
   "name": "weather-dashboard2",
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Dashboard de Temperatura em Tempo Real com Angular 20 e Node 22.14",
   "scripts": {
     "ng": "ng",
-    "start": "ng serve",
+    "start": "ng serve --port 4200 --open",
+    "start:dev": "ng serve --configuration development --port 4200 --open",
+    "start:prod": "ng serve --configuration production --port 4200",
     "build": "ng build",
+    "build:prod": "ng build --configuration production --optimization",
+    "build:analyze": "ng build --configuration production --stats-json",
     "watch": "ng build --watch --configuration development",
-    "test": "ng test"
+    "test": "ng test",
+    "test:ci": "ng test --watch=false --browsers=ChromeHeadless",
+    "lint": "ng lint",
+    "serve:dist": "http-server dist/weather-dashboard -p 8080 -c-1",
+    "analyze": "npm run build:analyze && npx webpack-bundle-analyzer dist/weather-dashboard/stats.json",
+    "update:deps": "ng update @angular/cli @angular/core",
+    "check:deps": "npm outdated",
+    "clean": "rmdir /s /q node_modules dist && del /f /q package-lock.json && npm install"
   },
   "prettier": {
     "printWidth": 100,
@@ -22,6 +34,7 @@
   },
   "private": true,
   "dependencies": {
+    "@angular-devkit/build-angular": "^20.1.6",
     "@angular/animations": "^20.1.7",
     "@angular/cdk": "^20.1.6",
     "@angular/common": "^20.1.7",
