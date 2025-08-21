@@ -1,208 +1,59 @@
-import { Injectable, OnDestroy } from '@angular/core';
-import { BehaviorSubject, Observable, interval, EMPTY, Subject } from 'rxjs';
-import { 
-  switchMap, 
-  catchError, 
-  takeUntil, 
-  distinctUntilChanged,
-  debounceTime,
-  share,
-  startWith
-} from 'rxjs/operators';
-import { format, isToday, parseISO } from 'date-fns';
-import { WeatherApiService } from './weather-api.service';
-import { WeatherForecast, ChartDataPoint, WeatherChartData } from '../models/weather.model';
-import { environment } from '../../../environments/environment';
+# WeatherDashboard2
 
-export interface WeatherState {
-  data: WeatherChartData | null;
-  loading: boolean;
-  error: string | null;
-  lastUpdated: Date | null;
-}
+This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.1.6.
 
-@Injectable({
-  providedIn: 'root'
-})
-export class WeatherDataService implements OnDestroy {
-  private destroy$ = new Subject<void>();
-  private citySubject = new BehaviorSubject<string>(environment.defaultCity);
-  private stateSubject = new BehaviorSubject<WeatherState>({
-    data: null,
-    loading: false,
-    error: null,
-    lastUpdated: null
-  });
+## Development server
 
-  public readonly state$ = this.stateSubject.asObservable();
-  public readonly city$ = this.citySubject.asObservable();
+To start a local development server, run:
 
-  private dataStream$: Observable<WeatherForecast>;
+```bash
+ng serve
+```
 
-  constructor(private weatherApi: WeatherApiService) {
-    this.initializeDataStream();
-    this.startPolling();
-  }
+Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
 
-  ngOnDestroy(): void {
-    this.destroy$.next();
-    this.destroy$.complete();
-  }
+## Code scaffolding
 
-  setCity(city: string): void {
-    if (city && city.trim() !== this.citySubject.value) {
-      this.citySubject.next(city.trim());
-    }
-  }
+Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
 
-  getCurrentState(): WeatherState {
-    return this.stateSubject.value;
-  }
+```bash
+ng generate component component-name
+```
 
-  refreshData(): void {
-    this.loadWeatherData();
-  }
+For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
 
-  private initializeDataStream(): void {
-    this.dataStream$ = this.city$.pipe(
-      debounceTime(300), // Debounce city changes
-      distinctUntilChanged(),
-      switchMap(city => {
-        this.updateState({ loading: true, error: null });
-        return this.weatherApi.getForecast(city, environment.defaultCountryCode);
-      }),
-      catchError(error => {
-        this.updateState({ 
-          loading: false, 
-          error: error.message || 'Failed to load weather data' 
-        });
-        return EMPTY;
-      }),
-      share() // Share the stream among multiple subscribers
-    );
-  }
+```bash
+ng generate --help
+```
 
-  private startPolling(): void {
-    // Initial load
-    this.loadWeatherData();
+## Building
 
-    // Set up polling interval
-    interval(environment.updateInterval)
-      .pipe(
-        startWith(0),
-        switchMap(() => this.dataStream$),
-        takeUntil(this.destroy$)
-      )
-      .subscribe({
-        next: (forecast) => this.processWeatherData(forecast),
-        error: (error) => this.handleError(error)
-      });
-  }
+To build the project run:
 
-  private loadWeatherData(): void {
-    this.dataStream$
-      .pipe(takeUntil(this.destroy$))
-      .subscribe({
-        next: (forecast) => this.processWeatherData(forecast),
-        error: (error) => this.handleError(error)
-      });
-  }
+```bash
+ng build
+```
 
-  private processWeatherData(forecast: WeatherForecast): void {
-    try {
-      const chartData = this.transformToChartData(forecast);
-      this.updateState({
-        data: chartData,
-        loading: false,
-        error: null,
-        lastUpdated: new Date()
-      });
-    } catch (error) {
-      this.handleError(error);
-    }
-  }
+This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
 
-  private transformToChartData(forecast: WeatherForecast): WeatherChartData {
-    // Filter data for current month and group by day
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-    
-    const dailyData = new Map<string, { temps: number[], date: Date }>();
+## Running unit tests
 
-    forecast.list.forEach(item => {
-      const date = parseISO(item.dt_txt);
-      
-      if (date.getMonth() === currentMonth && date.getFullYear() === currentYear) {
-        const dayKey = format(date, 'yyyy-MM-dd');
-        
-        if (!dailyData.has(dayKey)) {
-          dailyData.set(dayKey, { temps: [], date });
-        }
-        
-        dailyData.get(dayKey)!.temps.push(item.main.temp);
-      }
-    });
+To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
 
-    // Calculate daily averages and prepare chart data
-    const labels: string[] = [];
-    const temperatures: number[] = [];
-    const minTemps: number[] = [];
-    const maxTemps: number[] = [];
+```bash
+ng test
+```
 
-    Array.from(dailyData.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .forEach(([dayKey, { temps, date }]) => {
-        const avgTemp = temps.reduce((sum, temp) => sum + temp, 0) / temps.length;
-        const minTemp = Math.min(...temps);
-        const maxTemp = Math.max(...temps);
+## Running end-to-end tests
 
-        labels.push(format(date, 'MMM dd'));
-        temperatures.push(Math.round(avgTemp * 10) / 10);
-        minTemps.push(Math.round(minTemp * 10) / 10);
-        maxTemps.push(Math.round(maxTemp * 10) / 10);
-      });
+For end-to-end (e2e) testing, run:
 
-    return {
-      labels,
-      datasets: [
-        {
-          label: 'Average Temperature (°C)',
-          data: temperatures,
-          borderColor: '#3b82f6',
-          backgroundColor: 'rgba(59, 130, 246, 0.1)',
-          tension: 0.4,
-          fill: false
-        },
-        {
-          label: 'Min Temperature (°C)',
-          data: minTemps,
-          borderColor: '#06b6d4',
-          backgroundColor: 'rgba(6, 182, 212, 0.1)',
-          tension: 0.4,
-          fill: false
-        },
-        {
-          label: 'Max Temperature (°C)',
-          data: maxTemps,
-          borderColor: '#f59e0b',
-          backgroundColor: 'rgba(245, 158, 11, 0.1)',
-          tension: 0.4,
-          fill: false
-        }
-      ]
-    };
-  }
+```bash
+ng e2e
+```
 
-  private updateState(partialState: Partial<WeatherState>): void {
-    const currentState = this.stateSubject.value;
-    this.stateSubject.next({ ...currentState, ...partialState });
-  }
+Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
 
-  private handleError(error: any): void {
-    console.error('Weather data service error:', error);
-    this.updateState({
-      loading: false,
-      error: error?.message || 'An unexpected error occurred'
-    });
-  }
-}
+## Additional Resources
+
+For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.

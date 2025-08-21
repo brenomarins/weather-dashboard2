@@ -7,17 +7,22 @@ import {
   ElementRef,
   AfterViewInit,
   signal,
-  computed
+  computed,
+  inject,
+  DestroyRef
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Subject } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
+import { Subject, combineLatest } from 'rxjs';
+import { takeUntil, debounceTime, distinctUntilChanged } from 'rxjs/operators';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Chart, ChartConfiguration, ChartType, registerables } from 'chart.js';
 
 import { WeatherDataService, WeatherState } from '../../core/services/weather-data.service';
+import { PerformanceService } from '../../core/services/performance.service';
 import { LoadingSpinnerComponent } from '../../shared/components/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/components/error-message/error-message.component';
+import { PerformanceMonitorComponent } from '../../shared/components/performance-monitor/performance-monitor.component';
 import { environment } from '../../../environments/environment';
 
 Chart.register(...registerables);
@@ -25,9 +30,11 @@ Chart.register(...registerables);
 @Component({
   selector: 'app-weather-chart',
   standalone: true,
-  imports: [CommonModule, FormsModule, LoadingSpinnerComponent, ErrorMessageComponent],
+  imports: [CommonModule, FormsModule, LoadingSpinnerComponent, ErrorMessageComponent, PerformanceMonitorComponent],
   template: `
     <div class="weather-chart-container">
+      <app-performance-monitor></app-performance-monitor>
+      
       <div class="chart-header">
         <div class="header-content">
           <h1 class="chart-title">Weather Temperature Trends</h1>
@@ -317,8 +324,11 @@ Chart.register(...registerables);
 export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
   @ViewChild('chartCanvas', { static: false }) chartCanvas!: ElementRef<HTMLCanvasElement>;
 
+  private destroyRef = inject(DestroyRef);
   private destroy$ = new Subject<void>();
   private chart: Chart | null = null;
+  private resizeObserver: ResizeObserver | null = null;
+  private animationFrameId: number | null = null;
 
   // Signals for reactive state management
   private weatherState = signal<WeatherState>({
@@ -328,6 +338,12 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
     lastUpdated: null
   });
 
+  private performanceMetrics = signal({
+    memoryUsage: 0,
+    connectionType: 'unknown',
+    isOnline: true,
+    shouldReduceAnimations: false
+  });
   public cityInput = environment.defaultCity;
 
   // Computed signals for template
@@ -337,22 +353,33 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
   public errorMessage = computed(() => this.weatherState().error || '');
   public lastUpdated = computed(() => this.weatherState().lastUpdated);
   public currentCity = computed(() => this.cityInput);
+  public shouldShowPerformanceWarning = computed(() => 
+    this.performanceMetrics().memoryUsage > 0.8 || 
+    !this.performanceMetrics().isOnline
+  );
 
-  constructor(private weatherDataService: WeatherDataService) {}
+  constructor(
+    private weatherDataService: WeatherDataService,
+    private performanceService: PerformanceService
+  ) {}
 
   ngOnInit(): void {
     this.subscribeToWeatherData();
     this.subscribeToCityChanges();
+    this.subscribeToPerformanceMetrics();
   }
 
   ngAfterViewInit(): void {
     this.initializeChart();
+    this.setupResizeObserver();
   }
 
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
     this.destroyChart();
+    this.cleanupResizeObserver();
+    this.cancelAnimationFrame();
   }
 
   updateCity(): void {
@@ -377,8 +404,100 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
   }
 
   private subscribeToWeatherData(): void {
+    this.weatherDataService.state$.pipe(
+      debounceTime(100), // Debounce rapid state changes
+      distinctUntilChanged((prev, curr) => 
+        prev.loading === curr.loading && 
+        prev.error === curr.error &&
+        prev.data === curr.data
+      ),
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(state => {
+      this.weatherState.set(state);
+      this.scheduleChartUpdate(state.data);
+    });
+  }
+
+  private subscribeToPerformanceMetrics(): void {
+    this.performanceService.metrics$.pipe(
+      takeUntilDestroyed(this.destroyRef)
+    ).subscribe(metrics => {
+      this.performanceMetrics.set({
+        memoryUsage: metrics.memoryUsage,
+        connectionType: metrics.connectionType,
+        isOnline: metrics.isOnline,
+        shouldReduceAnimations: metrics.memoryUsage > 0.7 || 
+                               ['slow-2g', '2g'].includes(metrics.connectionType)
+      });
+      
+      // Adjust chart performance based on metrics
+      this.adjustChartPerformance();
+    });
+  }
+
+  private scheduleChartUpdate(data: any): void {
+    // Use requestAnimationFrame for smooth updates
+    this.cancelAnimationFrame();
+    
+    this.animationFrameId = requestAnimationFrame(() => {
+      this.updateChart(data);
+    });
+  }
+
+  private cancelAnimationFrame(): void {
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+  }
+
+  private setupResizeObserver(): void {
+    if (!this.chartCanvas?.nativeElement || !('ResizeObserver' in window)) {
+      return;
+    }
+
+    this.resizeObserver = new ResizeObserver(entries => {
+      // Debounce resize events
+      this.cancelAnimationFrame();
+      this.animationFrameId = requestAnimationFrame(() => {
+        if (this.chart) {
+          this.chart.resize();
+        }
+      });
+    });
+
+    this.resizeObserver.observe(this.chartCanvas.nativeElement);
+  }
+
+  private cleanupResizeObserver(): void {
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+  }
+
+  private adjustChartPerformance(): void {
+    if (!this.chart) return;
+
+    const metrics = this.performanceMetrics();
+    const shouldReduceAnimations = metrics.shouldReduceAnimations;
+
+    // Adjust chart options based on performance
+    if (this.chart.options.animation) {
+      this.chart.options.animation.duration = shouldReduceAnimations ? 0 : 750;
+    }
+
+    // Reduce point radius on low-end devices
+    if (this.chart.options.elements?.point) {
+      this.chart.options.elements.point.radius = shouldReduceAnimations ? 2 : 4;
+    }
+
+    this.chart.update('none'); // Update without animation
+  }
+
+  private subscribeToWeatherDataLegacy(): void {
     this.weatherDataService.state$
-      .pipe(takeUntil(this.destroy$))
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(state => {
         this.weatherState.set(state);
         this.updateChart(state.data);
@@ -387,7 +506,7 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
 
   private subscribeToCityChanges(): void {
     this.weatherDataService.city$
-      .pipe(takeUntil(this.destroy$))
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(city => {
         this.cityInput = city;
       });
@@ -468,7 +587,22 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
         },
         animation: {
           duration: 750,
-          easing: 'easeInOutQuart'
+          easing: 'easeInOutQuart',
+          onComplete: () => {
+            // Callback when animation completes
+            console.log('Chart animation completed');
+          }
+        },
+        // Performance optimizations
+        parsing: {
+          xAxisKey: 'x',
+          yAxisKey: 'y'
+        },
+        datasets: {
+          line: {
+            pointHoverRadius: 8,
+            pointHitRadius: 10
+          }
         }
       }
     };
@@ -479,8 +613,20 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
   private updateChart(data: any): void {
     if (!this.chart || !data) return;
 
+    // Performance optimization: only update if data actually changed
+    const currentData = JSON.stringify(this.chart.data);
+    const newData = JSON.stringify(data);
+    
+    if (currentData === newData) {
+      return; // No update needed
+    }
     this.chart.data = data;
-    this.chart.update('active');
+    
+    // Use different update modes based on performance
+    const metrics = this.performanceMetrics();
+    const updateMode = metrics.shouldReduceAnimations ? 'none' : 'active';
+    
+    this.chart.update(updateMode);
   }
 
   private destroyChart(): void {
@@ -488,5 +634,22 @@ export class WeatherChartComponent implements OnInit, OnDestroy, AfterViewInit {
       this.chart.destroy();
       this.chart = null;
     }
+  }
+
+  // Method to export chart as image (useful for sharing/reports)
+  exportChart(): string | null {
+    if (!this.chart) return null;
+    
+    return this.chart.toBase64Image('image/png', 1.0);
+  }
+
+  // Method to get chart performance metrics
+  getChartMetrics(): any {
+    return {
+      isInitialized: !!this.chart,
+      dataPoints: this.chart?.data?.datasets?.[0]?.data?.length || 0,
+      performanceMetrics: this.performanceMetrics(),
+      lastUpdate: this.lastUpdated()
+    };
   }
 }
